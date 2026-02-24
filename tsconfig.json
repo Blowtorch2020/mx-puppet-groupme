@@ -1,0 +1,18 @@
+{
+  "compilerOptions": {
+    "module": "commonjs",
+    "moduleResolution": "node",
+    "esModuleInterop": true,
+    "target": "es2016",
+    "noImplicitAny": false,
+    "inlineSourceMap": true,
+    "outDir": "./build",
+    "types": ["node"],
+    "strictNullChecks": true,
+    "allowSyntheticDefaultImports": true
+  },
+  "compileOnSave": true,
+  "include": [
+    "src/**/*"
+  ]
+}
