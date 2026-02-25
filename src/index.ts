@@ -138,6 +138,23 @@ Usage: \`bridgealldms <puppetId>\``
 
 Usage: \`bridgeeverything <puppetId>\``
     });
+    puppet.registerCommand("createspace", {
+        fn: groupme.createSpace.bind(groupme),
+        help: `Create a Matrix Space to organize your GroupMe rooms
+
+Usage: \`createspace <puppetId>\`
+
+This creates a Space that will contain all your bridged GroupMe rooms.
+New rooms bridged after creating the space will be automatically added.`
+    });
+    puppet.registerCommand("syncspace", {
+        fn: groupme.syncSpace.bind(groupme),
+        help: `Add all bridged rooms to your GroupMe Space
+
+Usage: \`syncspace <puppetId>\`
+
+Use this to add rooms that were bridged before the space was created.`
+    });
 
     await puppet.start();
 }

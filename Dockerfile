@@ -2,8 +2,10 @@ FROM node:18-alpine AS builder
 
 WORKDIR /opt/mx-puppet-groupme
 
+# Install build dependencies for native modules (canvas, etc.)
 RUN apk add --no-cache \
         python3 \
+        make \
         g++ \
         build-base \
         cairo-dev \
@@ -14,15 +16,17 @@ RUN apk add --no-cache \
         pixman-dev \
         pangomm-dev \
         libjpeg-turbo-dev \
-        freetype-dev
+        freetype-dev \
+        pkgconfig
 
-# run build process as user in case of npm pre hooks
-# pre hooks are not executed while running as root
+# Copy package files first for better caching
+COPY package*.json ./
 
+# Install dependencies as root to ensure native modules compile
+RUN npm install --build-from-source
+
+# Copy source and build
 COPY . .
-RUN chown -R node:node /opt/mx-puppet-groupme
-USER node
-RUN npm install
 RUN npm run build
 
 
@@ -33,12 +37,21 @@ VOLUME /data
 ENV CONFIG_PATH=/data/config.yaml \
     REGISTRATION_PATH=/data/groupme-registration.yaml
 
-# su-exec is used by docker-run.sh to drop privileges
-RUN apk add --no-cache su-exec pixman cairo pango giflib libjpeg
+# Runtime dependencies for native modules
+RUN apk add --no-cache \
+        su-exec \
+        pixman \
+        cairo \
+        pango \
+        giflib \
+        libjpeg-turbo \
+        freetype
 
 WORKDIR /opt/mx-puppet-groupme
 COPY docker-run.sh ./
-COPY --from=builder /opt/mx-puppet-groupme/ .
+COPY --from=builder /opt/mx-puppet-groupme/node_modules ./node_modules
+COPY --from=builder /opt/mx-puppet-groupme/build ./build
+COPY --from=builder /opt/mx-puppet-groupme/package*.json ./
 RUN chmod +x docker-run.sh
 
 # change workdir to /data so relative paths in the config.yaml

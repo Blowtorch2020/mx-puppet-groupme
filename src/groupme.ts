@@ -22,6 +22,10 @@ import { Client } from "./client.js";
 
 const log = new Log("GroupMePuppet:groupme");
 
+// Space state event type for adding child rooms
+const SPACE_CHILD_EVENT_TYPE = "m.space.child";
+const SPACE_PARENT_EVENT_TYPE = "m.space.parent";
+
 interface IGroupMePuppet {
     client: Client;
     data: any;
@@ -903,6 +907,15 @@ export class GroupMe {
                 roomId: param,
                 puppetId
             });
+            
+            // Add to space if one exists
+            if (p.data.spaceId) {
+                const matrixRoomId = await this.getMatrixRoomId(puppetId, param);
+                if (matrixRoomId) {
+                    await this.addRoomToSpace(puppetId, matrixRoomId);
+                }
+            }
+            
             await sendMessage("Group bridged");
         } catch (err) {
             log.warn(`Failed to bridge group ${param}: ${err}`);
@@ -944,12 +957,27 @@ export class GroupMe {
                 }
             })).data.response;
 
+            // Bridge all groups
             await Promise.all(groups.map(group =>
                 this.puppet.bridgeRoom({
                     roomId: group.id,
                     puppetId
                 })
             ));
+            
+            // Add to space if one exists
+            if (p.data.spaceId) {
+                // Small delay to ensure rooms are created
+                await new Promise(resolve => setTimeout(resolve, 1000));
+                
+                for (const group of groups) {
+                    const matrixRoomId = await this.getMatrixRoomId(puppetId, group.id);
+                    if (matrixRoomId) {
+                        await this.addRoomToSpace(puppetId, matrixRoomId);
+                    }
+                }
+            }
+            
             await sendMessage("All groups bridged");
         } catch (err) {
             log.error(`Failed to bridge groups: ${err}`);
@@ -967,12 +995,29 @@ export class GroupMe {
         try {
             const dms = (await p.client.api.get("/chats", { params: { per_page: "100" } })).data.response;
 
-            await Promise.all(dms.map(dm =>
+            const dmRoomIds = dms.map(dm => [p.data.userId, dm.other_user.id].sort().join("+"));
+            
+            // Bridge all DMs
+            await Promise.all(dmRoomIds.map(roomId =>
                 this.puppet.bridgeRoom({
-                    roomId: [p.data.userId, dm.other_user.id].sort().join("+"),
+                    roomId,
                     puppetId
                 })
             ));
+            
+            // Add to space if one exists
+            if (p.data.spaceId) {
+                // Small delay to ensure rooms are created
+                await new Promise(resolve => setTimeout(resolve, 1000));
+                
+                for (const roomId of dmRoomIds) {
+                    const matrixRoomId = await this.getMatrixRoomId(puppetId, roomId);
+                    if (matrixRoomId) {
+                        await this.addRoomToSpace(puppetId, matrixRoomId);
+                    }
+                }
+            }
+            
             await sendMessage("All DMs bridged");
         } catch (err) {
             log.error(`Failed to bridge DMs: ${err}`);
@@ -991,5 +1036,216 @@ export class GroupMe {
             this.bridgeAllGroups(puppetId, param, sendMessage),
             this.bridgeAllDms(puppetId, param, sendMessage)
         ]);
+    }
+
+    // ==================== Matrix Spaces Support ====================
+
+    /**
+     * Get or create a Matrix Space for organizing GroupMe bridged rooms
+     */
+    async getOrCreateSpace(puppetId: number): Promise<string | null> {
+        const p = this.puppets[puppetId];
+        if (!p) return null;
+
+        // Check if space already exists in puppet data
+        if (p.data.spaceId) {
+            // Verify the space still exists
+            try {
+                const client = this.puppet.botIntent.underlyingClient;
+                await client.getRoomState(p.data.spaceId);
+                return p.data.spaceId;
+            } catch (err) {
+                // Space no longer exists, clear it
+                log.warn(`Space ${p.data.spaceId} no longer exists, will create new one`);
+                p.data.spaceId = null;
+            }
+        }
+
+        try {
+            const client = this.puppet.botIntent.underlyingClient;
+            
+            // Create the space room with proper state events
+            const spaceRoomId = await client.createRoom({
+                name: `GroupMe (${p.data.username})`,
+                topic: "GroupMe bridged chats",
+                preset: "private_chat",
+                creation_content: {
+                    type: "m.space"
+                },
+                initial_state: [
+                    {
+                        type: "m.room.history_visibility",
+                        state_key: "",
+                        content: { history_visibility: "shared" }
+                    }
+                ],
+                power_level_content_override: {
+                    events_default: 0,
+                    invite: 50,
+                    kick: 50,
+                    ban: 50,
+                    redact: 50,
+                    state_default: 50,
+                    events: {
+                        "m.room.name": 50,
+                        "m.room.avatar": 50,
+                        "m.room.topic": 50,
+                        "m.room.canonical_alias": 50,
+                        "m.space.child": 50,
+                        "m.room.power_levels": 100
+                    }
+                }
+            });
+
+            log.info(`Created GroupMe space ${spaceRoomId} for puppet ${puppetId}`);
+
+            // Store the space ID
+            p.data.spaceId = spaceRoomId;
+            await this.puppet.setPuppetData(puppetId, p.data);
+
+            // Invite the user to the space
+            try {
+                const userId = await this.puppet.provisioner.getMxid(puppetId);
+                if (userId) {
+                    await client.inviteUser(userId, spaceRoomId);
+                    log.info(`Invited ${userId} to space ${spaceRoomId}`);
+                }
+            } catch (err) {
+                log.warn(`Failed to invite user to space: ${err}`);
+            }
+
+            return spaceRoomId;
+        } catch (err) {
+            log.error(`Failed to create space for puppet ${puppetId}: ${err}`);
+            return null;
+        }
+    }
+
+    /**
+     * Add a Matrix room to the user's GroupMe Space
+     */
+    async addRoomToSpace(puppetId: number, matrixRoomId: string): Promise<boolean> {
+        const p = this.puppets[puppetId];
+        if (!p || !p.data.spaceId) return false;
+
+        try {
+            const client = this.puppet.botIntent.underlyingClient;
+            
+            // Add the room as a child of the space
+            await client.sendStateEvent(
+                p.data.spaceId,
+                SPACE_CHILD_EVENT_TYPE,
+                matrixRoomId,
+                {
+                    via: [this.puppet.Config.bridge.domain],
+                    suggested: false
+                }
+            );
+
+            log.debug(`Added room ${matrixRoomId} to space ${p.data.spaceId}`);
+            return true;
+        } catch (err) {
+            log.warn(`Failed to add room ${matrixRoomId} to space: ${err}`);
+            return false;
+        }
+    }
+
+    /**
+     * Get the Matrix room ID for a bridged GroupMe room
+     */
+    async getMatrixRoomId(puppetId: number, remoteRoomId: string): Promise<string | null> {
+        try {
+            const room = await this.puppet.roomSync.maybeGet({
+                puppetId,
+                roomId: remoteRoomId
+            });
+            return room?.mxid || null;
+        } catch (err) {
+            log.warn(`Failed to get Matrix room ID for ${remoteRoomId}: ${err}`);
+            return null;
+        }
+    }
+
+    /**
+     * Create a space and add all currently bridged rooms to it
+     */
+    async createSpace(puppetId: number, sendMessage: SendMessageFn) {
+        const p = this.puppets[puppetId];
+        if (!p) {
+            await sendMessage("Puppet not found!");
+            return;
+        }
+
+        try {
+            const spaceId = await this.getOrCreateSpace(puppetId);
+            if (!spaceId) {
+                await sendMessage("Failed to create space");
+                return;
+            }
+
+            await sendMessage(`Space created! Room ID: ${spaceId}\nUse \`syncspace\` to add all bridged rooms to the space.`);
+        } catch (err) {
+            log.error(`Failed to create space: ${err}`);
+            await sendMessage("Failed to create space");
+        }
+    }
+
+    /**
+     * Sync all bridged rooms to the user's space
+     */
+    async syncSpace(puppetId: number, sendMessage: SendMessageFn) {
+        const p = this.puppets[puppetId];
+        if (!p) {
+            await sendMessage("Puppet not found!");
+            return;
+        }
+
+        if (!p.data.spaceId) {
+            await sendMessage("No space exists. Use `createspace` first.");
+            return;
+        }
+
+        try {
+            // Get all bridged groups
+            const groups = (await p.client.api.get("/groups", {
+                params: { per_page: "500", omit: "memberships" }
+            })).data.response;
+
+            // Get all DMs
+            const dms = (await p.client.api.get("/chats", { params: { per_page: "100" } })).data.response;
+
+            let addedCount = 0;
+            let failedCount = 0;
+
+            // Add groups to space
+            for (const group of groups) {
+                const matrixRoomId = await this.getMatrixRoomId(puppetId, group.id);
+                if (matrixRoomId) {
+                    if (await this.addRoomToSpace(puppetId, matrixRoomId)) {
+                        addedCount++;
+                    } else {
+                        failedCount++;
+                    }
+                }
+            }
+
+            // Add DMs to space
+            for (const dm of dms) {
+                const dmRoomId = [p.data.userId, dm.other_user.id].sort().join("+");
+                const matrixRoomId = await this.getMatrixRoomId(puppetId, dmRoomId);
+                if (matrixRoomId) {
+                    if (await this.addRoomToSpace(puppetId, matrixRoomId)) {
+                        addedCount++;
+                    } else {
+                        failedCount++;
+                    }
+                }
+            }
+
+            await sendMessage(`Space synced! Added ${addedCount} rooms.${failedCount > 0 ? ` Failed: ${failedCount}` : ""}`);
+        } catch (err) {
+            log.error(`Failed to sync space: ${err}`);
+            await sendMessage("Failed to sync space");
+        }
     }
 }

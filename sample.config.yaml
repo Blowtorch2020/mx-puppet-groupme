@@ -3,10 +3,13 @@ bridge:
   # Used for communication between the homeserver and the bridge
   port: 8437
   # The host connections to the bridge's webserver are allowed from
+  # Use "0.0.0.0" for Docker deployments, "localhost" for local installs
   bindAddress: localhost
   # Public domain of the homeserver
   domain: matrix.org
   # Reachable URL of the Matrix homeserver
+  # For Docker: use the container/service name (e.g., http://synapse:8008)
+  # For local: use the actual URL (e.g., https://matrix.org or http://localhost:8008)
   homeserverUrl: https://matrix.org
   # Display name of the bridge bot
   #displayname: GroupMe bridge
